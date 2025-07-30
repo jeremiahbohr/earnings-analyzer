@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+*.db
+GEMINI.md
+constitution.md
+todo.md
+api.txt
+project_outline.md
+test_package_usage.py
+vignette.py 
+.pytest_cache/
+dist/
+*.egg-info/
+
