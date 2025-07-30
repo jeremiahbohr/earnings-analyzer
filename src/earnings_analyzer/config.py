@@ -10,11 +10,7 @@ def get_gemini_api_key():
 def get_fmp_api_key():
     return os.getenv("FMP_API_KEY")
 
-def get_sec_api_key():
-    return os.getenv("SEC_API_KEY")
 
-def get_alpha_vantage_api_key():
-    return os.getenv("ALPHA_VANTAGE_API_KEY")
 
 def set_gemini_api_key(api_key: str):
     """Sets the Gemini API key programmatically."""

@@ -44,6 +44,7 @@ def find_transcript_url_by_quarter(ticker, quarter, year):
             # /earnings/call-transcripts/2024/01/25/apple-aapl-q1-2024-earnings-call-transcript/
             # We need to be careful with the quarter format in the URL (e.g., q1, q2)
             if f"-{quarter.lower()}-{year}-earnings" in result:
+                logging.info(f"Found {quarter} {year} transcript URL: {result}")
                 return result
         logging.warning(f"Could not find {quarter} {year} transcript URL for {ticker} on fool.com.")
         return None
@@ -60,7 +61,7 @@ def get_transcript_from_fool(url):
     }
     
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
@@ -72,6 +73,9 @@ def get_transcript_from_fool(url):
             logging.warning("Could not find the article body in the transcript.")
             return None
 
+    except requests.exceptions.HTTPError as e:
+        logging.error(f"HTTP Error fetching transcript from Motley Fool (Status: {e.response.status_code}): {e}. Check if the URL is correct or if you are blocked (e.g., by a VPN).")
+        return None
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching transcript from Motley Fool: {e}")
+        logging.error(f"Network Error fetching transcript from Motley Fool: {e}. Check your internet connection.")
         return None

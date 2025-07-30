@@ -24,8 +24,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "scipy>=1.11.0",
     "sec-api>=1.0.0",
-    "beautifulsoup4>=4.12.3",
-    "lxml>=5.2.2",
+    "beautifulsoup4>=4.12.3,<5",
+    "lxml>=5.2.2,<6",
     "googlesearch-python>=1.1.0",
 ]
 

@@ -10,8 +10,9 @@ todo.md
 api.txt
 project_outline.md
 test_package_usage.py
-vignette.py 
+vignette.ipynb
 .pytest_cache/
 dist/
 *.egg-info/
+build/
 

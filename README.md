@@ -13,15 +13,7 @@ This Python package provides a tool to fetch company profile data, scrape the la
 
 ## Installation
 
-To install the package, you can either install it directly from PyPI (once available) or from the GitHub repository.
-
-### From PyPI (Recommended)
-
-```bash
-pip install earnings-analyzer
-```
-
-### From GitHub
+This package is not yet available on PyPI. You can install it directly from the GitHub repository:
 
 ```bash
 pip install git+https://github.com/jeremiahbohr/earnings-analyzer.git

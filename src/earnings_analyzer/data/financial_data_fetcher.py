@@ -23,7 +23,7 @@ def get_historical_prices(ticker):
     url = f"{BASE_URL}/historical-price-full/{ticker}?apikey={get_fmp_api_key()}"
     
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -47,7 +47,7 @@ def get_company_profile(ticker):
     url = f"{BASE_URL}/profile/{ticker}?apikey={get_fmp_api_key()}"
     
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -78,11 +78,12 @@ def get_financial_statements(ticker):
         income_response.raise_for_status()
         income_statement = income_response.json()
 
-        balance_response = requests.get(balance_url)
+        balance_response = requests.get(balance_url, timeout=10)
         balance_response.raise_for_status()
         balance_sheet = balance_response.json()
 
         if income_statement and balance_sheet:
+            logging.info(f"Successfully fetched financial statements for {ticker}.")
             return {
                 "income_statement": income_statement[0], # Most recent quarter
                 "balance_sheet": balance_sheet[0] # Most recent quarter
@@ -91,8 +92,14 @@ def get_financial_statements(ticker):
             logging.warning(f"No financial statements found for {ticker}.")
             return None
 
+    except requests.exceptions.HTTPError as e:
+        logging.error(f"HTTP Error fetching financial statements from FMP API (Status: {e.response.status_code}): {e}. Check your API key or ticker symbol.")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        logging.error(f"Connection Error fetching financial statements from FMP API: {e}. Check your internet connection.")
+        return None
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching financial statements from FMP API for {ticker}: {e}")
+        logging.error(f"An unexpected Request Error occurred fetching financial statements from FMP API for {ticker}: {e}")
         return None
 
 if __name__ == '__main__':

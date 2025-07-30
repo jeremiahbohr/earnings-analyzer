@@ -6,9 +6,18 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-# Determine the absolute path for the database file to be in the project root
-# This navigates up from `src/earnings_analyzer/data` to the `earnings_analyzer` directory
-DATABASE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'earnings_analyzer.db'))
+import os
+from pathlib import Path
+
+# Determine the absolute path for the database file
+# Prioritize EARNINGS_ANALYZER_DB environment variable
+# Otherwise, default to ~/.earnings_analyzer/earnings_analyzer.db
+if os.getenv("EARNINGS_ANALYZER_DB"):
+    DATABASE_FILE = os.getenv("EARNINGS_ANALYZER_DB")
+else:
+    app_data_dir = Path.home() / ".earnings_analyzer"
+    app_data_dir.mkdir(parents=True, exist_ok=True)
+    DATABASE_FILE = str(app_data_dir / "earnings_analyzer.db")
 
 sql_create_companies_table = """
 CREATE TABLE IF NOT EXISTS companies (

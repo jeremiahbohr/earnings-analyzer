@@ -26,7 +26,14 @@ def main():
         default="gemini-2.5-flash",
         help="The Gemini model to use for sentiment analysis (e.g., gemini-2.5-flash, gemini-1.5-pro)."
     )
+    parser.add_argument(
+        "--db-path",
+        help="Optional: Path to the SQLite database file. Defaults to ~/.earnings_analyzer/earnings_analyzer.db."
+    )
     args = parser.parse_args()
+
+    if args.db_path:
+        os.environ["EARNINGS_ANALYZER_DB"] = args.db_path
 
     # 1. Create an instance of our analyzer
     analyzer = EarningsAnalyzer()
