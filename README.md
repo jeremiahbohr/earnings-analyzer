@@ -64,8 +64,22 @@ export FMP_API_KEY=your_financial_modeling_prep_api_key_here
 
 The package provides an `EarningsAnalyzer` class that encapsulates the entire workflow. You can use it in your own Python script or via the command-line interface.
 
+## Quick Start Tutorial
+
+**👉 [Open the Interactive Tutorial](vignette.ipynb)** - Complete walkthrough with live examples, outputs, and troubleshooting
+
+This Jupyter notebook walks you through:
+- Setting up API keys
+- Analyzing earnings calls
+- Understanding the AI metrics
+- Retrieving cached data
+- Troubleshooting common issues
+
+---
+
 ## Data Usage Disclaimer
 This tool is for educational and research purposes. Users are responsible for:
 - Obtaining proper API keys and respecting rate limits
 - Complying with data provider terms of service  
 - Not using for illegal market manipulation
+
