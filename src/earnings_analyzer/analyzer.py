@@ -26,20 +26,47 @@ class EarningsAnalyzer:
     def analyze(self, ticker, quarter=None, year=None, model_name="gemini-2.5-flash"):
         """
         Performs a full analysis for a given stock ticker.
-        Fetches company profile, scrapes the latest earnings transcript,
-        performs sentiment analysis, calculates stock performance,
-        and stores the results in the database.
-
-        Args:
-            ticker: The stock ticker symbol to analyze.
-            quarter: Optional. The quarter of the earnings call (e.g., "Q1", "Q2").
-            year: Optional. The year of the earnings call (e.g., 2024).
-            model_name: The name of the Gemini model to use.
-
-        Returns:
-            A dictionary containing the analysis results, or None on failure.
+        Checks for existing data before fetching and analyzing.
         """
-        logging.info(f"--- Analyzing {ticker} using {model_name} ---")
+        final_quarter, final_year, transcript_url = self._determine_call_identity(ticker, quarter, year)
+
+        if not all([final_quarter, final_year, transcript_url]):
+            logging.error(f"Could not determine the earnings call identity for {ticker}. Aborting.")
+            return None
+
+        # Check for an existing record using the determined quarter and year
+        existing_call = database.select_earnings_call_by_ticker_quarter_year(self.conn, ticker, final_quarter, final_year)
+        if existing_call:
+            logging.info(f"Found existing analysis for {ticker} {final_quarter} {final_year}. Returning cached data.")
+            return {
+                "profile": {
+                    "symbol": existing_call[0],
+                    "companyName": existing_call[1],
+                    "sector": existing_call[2]
+                },
+                "call_date": existing_call[3],
+                "quarter": existing_call[4],
+                "year": existing_call[5],
+                "filing_url": existing_call[6],
+                "sentiment": {
+                    "overall_sentiment_score": existing_call[7],
+                    "confidence_level": existing_call[8],
+                    "key_themes": json.loads(existing_call[9]) if existing_call[9] else [],
+                    "model_name": existing_call[10],
+                    "qualitative_assessment": existing_call[11]
+                },
+                "stock_performance": {
+                    "price_at_call": existing_call[12],
+                    "price_1_week": existing_call[13],
+                    "price_1_month": existing_call[14],
+                    "price_3_month": existing_call[15],
+                    "performance_1_week": existing_call[16],
+                    "performance_1_month": existing_call[17],
+                    "performance_3_month": existing_call[18]
+                }
+            }
+
+        logging.info(f"--- No cached data found. Starting full analysis for {ticker} {final_quarter} {final_year} ---")
 
         # 1. Fetch Company Profile
         logging.info("Fetching company profile...")
@@ -154,7 +181,14 @@ class EarningsAnalyzer:
                 # Store sentiment analysis results
                 if earnings_call_id and sentiment:
                     key_themes_json = json.dumps(sentiment.get('key_themes', []))
-                    sentiment_data = (earnings_call_id, sentiment.get('overall_sentiment_score'), sentiment.get('confidence_level'), key_themes_json)
+                    sentiment_data = (
+                        earnings_call_id,
+                        sentiment.get('overall_sentiment_score'),
+                        sentiment.get('confidence_level'),
+                        key_themes_json,
+                        model_name,
+                        sentiment.get('qualitative_assessment')
+                    )
                     database.insert_sentiment_analysis(self.conn, sentiment_data)
 
                 # Store stock performance results
@@ -231,19 +265,106 @@ class EarningsAnalyzer:
             logging.warning(f"Error calculating stock performance for {ticker}: {e}")
             return None
 
+    def _determine_call_identity(self, ticker, quarter, year):
+        """Determines the specific quarter, year, and transcript URL for a request."""
+        transcript_url = None
+        try:
+            if quarter and year:
+                logging.info(f"Attempting to find {quarter} {year} transcript for {ticker}...")
+                transcript_url = fool_scraper.find_transcript_url_by_quarter(ticker, quarter, year)
+            else:
+                logging.info(f"Attempting to find latest transcript for {ticker}...")
+                transcript_url = fool_scraper.find_latest_transcript_url(ticker)
+
+            if not transcript_url:
+                return None, None, None
+
+        except Exception as e:
+            logging.error(f"Error finding transcript URL for {ticker}: {e}.")
+            return None, None, None
+
+        # Extract quarter and year from URL if not provided
+        if not (quarter and year):
+            match = re.search(r'-q(\d)-(\d{4})-earnings-call-transcript', transcript_url)
+            if match:
+                quarter = f"Q{match.group(1)}"
+                year = int(match.group(2))
+
+        return quarter, year, transcript_url
+
+    def get_existing_calls(self, ticker):
+        """
+        Retrieves a list of existing earnings calls for a given ticker from the database.
+
+        Args:
+            ticker: The stock ticker symbol.
+
+        Returns:
+            A list of dictionaries, each containing 'call_date', 'quarter', and 'year'
+            for the existing earnings calls, or an empty list if none found or on error.
+        """
+        if not self.conn:
+            logging.error("Database connection not established. Cannot retrieve existing calls.")
+            return []
+        
+        try:
+            records = database.select_earnings_calls_by_ticker(self.conn, ticker)
+            if records:
+                return [{
+                    'ticker': r[0],
+                    'call_date': r[1],
+                    'quarter': r[2],
+                    'year': r[3],
+                    'filing_url': r[4],
+                    'overall_sentiment_score': r[5],
+                    'confidence_level': r[6],
+                    'model_name': r[7],
+                    'qualitative_assessment': r[8],
+                    'key_themes': json.loads(r[9]) if r[9] else [] # Parse JSON string back to list
+                } for r in records]
+            else:
+                return []
+        except Exception as e:
+            logging.error(f"Error retrieving existing calls for {ticker}: {e}")
+            return []
+
+    def get_all_calls(self):
+        """
+        Retrieves all earnings calls from the database.
+
+        Returns:
+            A list of dictionaries, each representing an earnings call,
+            or an empty list if none found or on error.
+        """
+        if not self.conn:
+            logging.error("Database connection not established. Cannot retrieve calls.")
+            return []
+        
+        try:
+            records = database.select_all_earnings_calls(self.conn)
+            if records:
+                return [{
+                    'ticker': r[0],
+                    'call_date': r[1],
+                    'quarter': r[2],
+                    'year': r[3],
+                    'filing_url': r[4],
+                    'overall_sentiment_score': r[5],
+                    'confidence_level': r[6],
+                    'model_name': r[7],
+                    'qualitative_assessment': r[8],
+                    'key_themes': json.loads(r[9]) if r[9] and isinstance(r[9], str) else r[9]
+                } for r in records]
+            else:
+                return []
+        except Exception as e:
+            logging.error(f"Error retrieving all calls: {e}")
+            return []
+
     def analyze_to_dataframe(self, ticker, quarter=None, year=None, model_name="gemini-2.5-flash"):
         """
         Performs a full analysis for a given stock ticker and returns the results
         as a pandas DataFrame row, including a qualitative assessment.
-
-        Args:
-            ticker: The stock ticker symbol to analyze.
-            quarter: Optional. The quarter of the earnings call (e.g., "Q1", "Q2").
-            year: Optional. The year of the earnings call (e.g., 2024).
-            model_name: The name of the Gemini model to use.
-
-        Returns:
-            pandas.DataFrame: A DataFrame containing the analysis results, or an empty DataFrame on failure.
         """
         analysis_results = self.analyze(ticker, quarter=quarter, year=year, model_name=model_name)
 
@@ -254,20 +375,17 @@ class EarningsAnalyzer:
         sentiment_data = analysis_results.get('sentiment', {})
         stock_performance_data = analysis_results.get('stock_performance', {})
 
-        # Generate qualitative assessment
-        qualitative_assessment = sentiment_analyzer.generate_qualitative_assessment(sentiment_data, model_name=model_name)
-
         # Flatten the data into a single dictionary for DataFrame row
         df_row = {
             'Ticker': profile_data.get('symbol'),
             'Company Name': profile_data.get('companyName'),
             'Sector': profile_data.get('sector'),
             'Industry': profile_data.get('industry'),
-            'Sentiment Model': analysis_results.get('model_name'),
+            'Sentiment Model': sentiment_data.get('model_name'),
             'Overall Sentiment Score': sentiment_data.get('overall_sentiment_score'),
             'Sentiment Confidence': sentiment_data.get('confidence_level'),
             'Key Themes': ", ".join(sentiment_data.get('key_themes', [])),
-            'Qualitative Assessment': qualitative_assessment,
+            'Qualitative Assessment': sentiment_data.get('qualitative_assessment'),
             'Price at Call': stock_performance_data.get('price_at_call'),
             '1 Week Performance': stock_performance_data.get('performance_1_week'),
             '1 Month Performance': stock_performance_data.get('performance_1_month'),

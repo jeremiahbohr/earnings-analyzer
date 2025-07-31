@@ -1,6 +1,6 @@
 import requests
 import logging
-from earnings_analyzer.config import get_fmp_api_key, get_sec_api_key
+from earnings_analyzer.config import get_fmp_api_key
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -101,27 +101,3 @@ def get_financial_statements(ticker):
     except requests.exceptions.RequestException as e:
         logging.error(f"An unexpected Request Error occurred fetching financial statements from FMP API for {ticker}: {e}")
         return None
-
-if __name__ == '__main__':
-    # Example usage:
-    ticker_symbol = "AAPL"
-    print(f"Fetching data for {ticker_symbol}...")
-
-    profile = get_company_profile(ticker_symbol)
-    if profile:
-        print("\n--- Company Profile ---")
-        print(f"Sector: {profile.get('sector')}")
-        print(f"Industry: {profile.get('industry')}")
-
-    financials = get_financial_statements(ticker_symbol)
-    if financials:
-        print("\n--- Key Financials ---")
-        print(f"Revenue: {financials['income_statement'].get('revenue')}")
-        print(f"Net Income: {financials['income_statement'].get('netIncome')}")
-        print(f"Total Debt: {financials['balance_sheet'].get('totalDebt')}")
-
-    historical_data = get_historical_prices(ticker_symbol)
-    if historical_data:
-        print("\n--- Historical Prices (Last 5 Days) ---")
-        for day in historical_data[:5]:
-            print(f"{day['date']}: Close = {day['close']}")

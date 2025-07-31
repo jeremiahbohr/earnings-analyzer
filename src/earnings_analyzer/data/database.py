@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS sentiment_analysis (
     overall_sentiment_score REAL,
     confidence_level REAL,
     key_themes TEXT,
+    model_name TEXT,
+    qualitative_assessment TEXT,
     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (earnings_call_id) REFERENCES earnings_calls (id)
 );
@@ -88,7 +90,7 @@ def create_table(conn, create_table_sql):
         logging.error(f"Error creating table: {e}")
 
 def setup_database():
-    """Create the database and all necessary tables if they don't exist."""
+    """Create the database and all necessary tables if they don't exist, and add new columns if missing."""
     conn = create_connection(DATABASE_FILE)
 
     if conn is not None:
@@ -96,6 +98,22 @@ def setup_database():
         create_table(conn, sql_create_earnings_calls_table)
         create_table(conn, sql_create_sentiment_analysis_table)
         create_table(conn, sql_create_stock_performance_table)
+
+        # Add new columns to sentiment_analysis table if they don't exist
+        try:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(sentiment_analysis);")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'model_name' not in columns:
+                cursor.execute("ALTER TABLE sentiment_analysis ADD COLUMN model_name TEXT;")
+                logging.info("Added 'model_name' column to sentiment_analysis table.")
+            if 'qualitative_assessment' not in columns:
+                cursor.execute("ALTER TABLE sentiment_analysis ADD COLUMN qualitative_assessment TEXT;")
+                logging.info("Added 'qualitative_assessment' column to sentiment_analysis table.")
+            conn.commit()
+        except Error as e:
+            logging.error(f"Error altering sentiment_analysis table: {e}")
+
         conn.close()
     else:
         logging.error("Error! cannot create the database connection.")
@@ -138,9 +156,11 @@ def insert_earnings_call(conn, earnings_call_data):
         return None
 
 def insert_sentiment_analysis(conn, sentiment_data):
-    """Insert a new sentiment analysis result."""
-    sql = ''' INSERT INTO sentiment_analysis(earnings_call_id, overall_sentiment_score, confidence_level, key_themes)
-              VALUES(?,?,?,?) '''
+    """Insert a new sentiment analysis result.
+    sentiment_data should be a tuple: (earnings_call_id, overall_sentiment_score, confidence_level, key_themes, model_name, qualitative_assessment)
+    """
+    sql = ''' INSERT INTO sentiment_analysis(earnings_call_id, overall_sentiment_score, confidence_level, key_themes, model_name, qualitative_assessment)
+              VALUES(?,?,?,?,?,?) '''
     try:
         cur = conn.cursor()
         cur.execute(sql, sentiment_data)
@@ -161,5 +181,83 @@ def insert_stock_performance(conn, stock_performance_data):
         return cur.lastrowid
     except Error as e:
         logging.error(f"Error inserting stock performance data: {e}")
+        return None
+
+def select_earnings_calls_by_ticker(conn, ticker):
+    """Query earnings calls by ticker, returning call_date, quarter, and year."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT
+            ec.ticker,
+            ec.call_date,
+            ec.quarter,
+            ec.year,
+            ec.filing_url,
+            sa.overall_sentiment_score,
+            sa.confidence_level,
+            sa.model_name,
+            sa.qualitative_assessment,
+            sa.key_themes
+        FROM
+            earnings_calls ec
+        JOIN
+            sentiment_analysis sa ON ec.id = sa.earnings_call_id
+        WHERE
+            ec.ticker = ?
+        ORDER BY
+            ec.call_date DESC""", (ticker,))
+        rows = cur.fetchall()
+        return rows
+    except Error as e:
+        logging.error(f"Error selecting earnings calls by ticker {ticker}: {e}")
+        return None
+
+def select_earnings_call_by_ticker_quarter_year(conn, ticker, quarter, year):
+    """Query a specific earnings call by ticker, quarter, and year, joining all related tables."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT
+            c.ticker, c.company_name, c.sector,
+            ec.call_date, ec.quarter, ec.year, ec.filing_url,
+            sa.overall_sentiment_score, sa.confidence_level, sa.key_themes, sa.model_name, sa.qualitative_assessment,
+            sp.price_at_call, sp.price_1_week, sp.price_1_month, sp.price_3_month,
+            sp.performance_1_week, sp.performance_1_month, sp.performance_3_month
+        FROM companies c
+        JOIN earnings_calls ec ON c.ticker = ec.ticker
+        LEFT JOIN sentiment_analysis sa ON ec.id = sa.earnings_call_id
+        LEFT JOIN stock_performance sp ON ec.id = sp.earnings_call_id
+        WHERE c.ticker = ? AND ec.quarter = ? AND ec.year = ?
+        """, (ticker, quarter, year))
+        row = cur.fetchone()
+        return row
+    except Error as e:
+        logging.error(f"Error selecting earnings call by ticker, quarter, and year for {ticker}: {e}")
+        return None
+
+def select_all_earnings_calls(conn):
+    """Query all earnings calls from the earnings_calls table."""
+    try:
+        cur = conn.cursor()
+        cur.execute("""SELECT
+            ec.ticker,
+            ec.call_date,
+            ec.quarter,
+            ec.year,
+            ec.filing_url,
+            sa.overall_sentiment_score,
+            sa.confidence_level,
+            sa.model_name,
+            sa.qualitative_assessment,
+            sa.key_themes
+        FROM
+            earnings_calls ec
+        JOIN
+            sentiment_analysis sa ON ec.id = sa.earnings_call_id
+        ORDER BY
+            ec.call_date DESC""")
+        rows = cur.fetchall()
+        return rows
+    except Error as e:
+        logging.error(f"Error selecting all earnings calls: {e}")
         return None
 
