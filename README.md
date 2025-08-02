@@ -109,15 +109,47 @@ print("AI Announcements:", sentiment['ai_announcements'])
 
 ### Batch Processing
 
+**Method 1: Using convenience function (recommended)**
+```python
+from earnings_analyzer.api import batch_analyze_earnings_calls
+
+tickers = ["AAPL", "MSFT", "GOOGL", "AMZN"]
+results = batch_analyze_earnings_calls(tickers)
+
+for ticker, result in zip(tickers, results):
+    if result:
+        sentiment = result['sentiment']
+        print(f"{ticker}: {sentiment['overall_sentiment_score']}/10")
+```
+
+**Method 2: Manual pipeline for custom processing**
 ```python
 from earnings_analyzer.api import batch_fetch_transcripts, batch_score_sentiment
 
 tickers = ["AAPL", "MSFT", "GOOGL", "AMZN"]
-transcripts = batch_fetch_transcripts(tickers)
-sentiments = batch_score_sentiment(transcripts)
 
-for ticker, sentiment in zip(tickers, sentiments):
-    if sentiment:
+# Fetch all transcripts
+transcripts = batch_fetch_transcripts(tickers)
+
+# Extract transcript text and analyze sentiment
+transcript_texts = [t['transcript_text'] for t in transcripts if t and t.get('transcript_text')]
+sentiments = batch_score_sentiment(transcript_texts)
+
+# Match results back to tickers
+for i, ticker in enumerate(tickers):
+    if i < len(sentiments) and sentiments[i]:
+        print(f"{ticker}: {sentiments[i]['overall_sentiment_score']}/10")
+```
+
+**Method 3: Quick sentiment-only batch analysis**
+```python
+from earnings_analyzer.api import quick_sentiment_analysis
+
+tickers = ["AAPL", "MSFT", "GOOGL", "AMZN"]
+for ticker in tickers:
+    result = quick_sentiment_analysis(ticker)
+    if result:
+        sentiment = result['sentiment']
         print(f"{ticker}: {sentiment['overall_sentiment_score']}/10")
 ```
 
@@ -177,6 +209,28 @@ all_results = analyzer.batch_analyze(tech_stocks)
 - Working repeatedly with the same companies
 - Automatic result caching is beneficial
 
+## Configuration and Setup Validation
+
+Check your configuration before starting analysis:
+
+```python
+from earnings_analyzer.api import validate_api_configuration, check_data_availability
+
+# Validate API keys and dependencies
+config = validate_api_configuration()
+if config['fully_configured']:
+    print("✓ Ready for analysis")
+else:
+    print("Configuration issues:", config['errors'])
+
+# Check data availability for specific ticker
+availability = check_data_availability("AAPL")
+if availability['analysis_feasible']:
+    print("✓ Data available for AAPL")
+else:
+    print("Issues:", availability['errors'])
+```
+
 ## Command Line Interface
 
 ```bash
@@ -202,6 +256,10 @@ earnings-analyzer --ticker TSLA --list-calls
 | `fetch_company_profile(ticker)` | Obtain company metadata | Dict with sector, industry, financials |
 | `calculate_stock_performance(ticker, date)` | Analyze post-earnings price movements | Dict with performance metrics |
 | `analyze_earnings_call(ticker, ...)` | Complete in-memory analysis | Dict with all analysis components |
+| `quick_sentiment_analysis(ticker, ...)` | Fast transcript + sentiment only | Dict with transcript and sentiment |
+| `batch_analyze_earnings_calls(tickers, ...)` | Batch complete analysis | List of analysis results |
+| `check_data_availability(ticker, ...)` | Check data availability | Dict with availability status |
+| `validate_api_configuration()` | Validate setup | Dict with configuration status |
 | `EarningsAnalyzer().analyze(ticker, ...)` | Complete analysis with database caching | Dict with all analysis components |
 
 ## Advanced Use Cases
@@ -249,6 +307,31 @@ results = analyzer.batch_analyze(portfolio)
 # Identify highest sentiment score
 best_sentiment = max(results, key=lambda x: x['sentiment']['overall_sentiment_score'] if x else 0)
 print(f"Highest sentiment: {best_sentiment['profile']['symbol']}")
+```
+
+### Data Pipeline Integration
+```python
+import pandas as pd
+from earnings_analyzer.api import batch_analyze_earnings_calls
+
+# Analyze portfolio and create DataFrame
+portfolio = ["AAPL", "MSFT", "GOOGL", "NVDA", "TSLA"]
+results = batch_analyze_earnings_calls(portfolio)
+
+# Convert to DataFrame for analysis
+data = []
+for result in results:
+    if result:
+        data.append({
+            'ticker': result['analysis_metadata']['ticker'],
+            'sentiment_score': result['sentiment']['overall_sentiment_score'],
+            'confidence': result['sentiment']['confidence_level'],
+            'sector': result['profile'].get('sector'),
+            '1w_performance': result['stock_performance']['performance_1_week'] if result['stock_performance'] else None
+        })
+
+df = pd.DataFrame(data)
+print(df.describe())
 ```
 
 ## Complete Documentation
@@ -301,10 +384,52 @@ import os
 os.environ["EARNINGS_ANALYZER_DB"] = "/path/to/your/database.db"
 ```
 
+**Batch Processing Issues:**
+```python
+# If batch functions aren't working as expected, try the convenience function
+from earnings_analyzer.api import batch_analyze_earnings_calls
+
+# This handles all the data structure matching automatically
+results = batch_analyze_earnings_calls(["AAPL", "MSFT"])
+```
+
+**Configuration Validation:**
+```python
+from earnings_analyzer.api import validate_api_configuration
+
+config = validate_api_configuration()
+if not config['fully_configured']:
+    print("Issues found:")
+    for error in config['errors']:
+        print(f"  - {error}")
+```
+
 **Common Issues:**
 - **403 Errors**: Verify API keys and check rate limits
 - **Transcript Not Found**: Verify ticker symbol and try alternative quarter/year
 - **Import Errors**: Confirm installation with `pip install earnings-analyzer`
+- **Batch Processing Errors**: Use `batch_analyze_earnings_calls()` for simplest batch processing
+- **Memory Issues**: For large batches, process in smaller chunks or use `quick_sentiment_analysis()`
+
+## Performance Tips
+
+**For Large-Scale Analysis:**
+```python
+# Process in chunks to manage memory and API rate limits
+def analyze_large_portfolio(tickers, chunk_size=5):
+    results = []
+    for i in range(0, len(tickers), chunk_size):
+        chunk = tickers[i:i+chunk_size]
+        chunk_results = batch_analyze_earnings_calls(chunk)
+        results.extend(chunk_results)
+        time.sleep(10)  # Respect rate limits
+    return results
+
+# Use database-backed analysis for repeated queries
+analyzer = EarningsAnalyzer()
+for ticker in large_portfolio:
+    result = analyzer.analyze(ticker)  # Automatically cached
+```
 
 ## Contributing
 

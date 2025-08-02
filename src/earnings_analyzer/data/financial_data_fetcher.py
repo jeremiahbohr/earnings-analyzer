@@ -2,6 +2,8 @@ import requests
 import logging
 import pandas as pd
 import datetime
+from urllib.parse import urlparse, parse_qs
+import time
 from earnings_analyzer.config import get_fmp_api_key
 
 # Configure logging
@@ -9,13 +11,121 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 BASE_URL = "https://financialmodelingprep.com/api/v3"
 
+# Cache API key validation result to avoid repeated checks
+_api_key_validated = None
+_last_rate_limit_time = {}
+
 def _check_fmp_api_key():
     """Internal helper to check if FMP API key is configured."""
-    if not get_fmp_api_key():
-        logging.error("FMP_API_KEY is not set in the environment variables. Please set it to use Financial Modeling Prep API.")
-        return False
-    return True
+    global _api_key_validated
+    
+    if _api_key_validated is None:
+        api_key = get_fmp_api_key()
+        if not api_key:
+            logging.error("FMP_API_KEY is not set in the environment variables. Please set it to use Financial Modeling Prep API.")
+            _api_key_validated = False
+        else:
+            _api_key_validated = True
+            
+    return _api_key_validated
 
+def _sanitize_url_for_logging(url):
+    """Remove API key from URL for safe logging."""
+    try:
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query)
+        if 'apikey' in query_params:
+            query_params['apikey'] = ['***REDACTED***']
+        safe_query = '&'.join([f"{k}={v[0]}" for k, v in query_params.items()])
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{safe_query}"
+    except Exception:
+        return "URL_PARSE_ERROR"
+
+def _handle_rate_limiting(response, ticker=None):
+    """Handle rate limiting with exponential backoff."""
+    global _last_rate_limit_time
+    
+    if response.status_code == 429:  # Too Many Requests
+        retry_after = response.headers.get('Retry-After')
+        if retry_after:
+            wait_time = int(retry_after)
+        else:
+            # Exponential backoff based on ticker
+            key = ticker or 'global'
+            last_time = _last_rate_limit_time.get(key, 0)
+            current_time = time.time()
+            if current_time - last_time < 60:  # Less than 1 minute since last rate limit
+                wait_time = min(120, 30 * (2 ** len(_last_rate_limit_time)))  # Max 2 minutes
+            else:
+                wait_time = 30
+            _last_rate_limit_time[key] = current_time
+            
+        logging.warning(f"Rate limited. Waiting {wait_time} seconds before retry...")
+        time.sleep(wait_time)
+        return True
+    return False
+
+def _make_api_request(url, timeout=30, max_retries=3, ticker=None):
+    """Make API request with proper error handling, rate limiting, and retries."""
+    if not _check_fmp_api_key():
+        return None
+        
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, timeout=timeout)
+            
+            # Handle rate limiting
+            if _handle_rate_limiting(response, ticker):
+                continue  # Retry after rate limit
+                
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data:
+                logging.warning(f"Empty response from FMP API for {_sanitize_url_for_logging(url)}")
+                return None
+                
+            return data
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403:
+                logging.error(f"API key invalid or quota exceeded (HTTP 403). Check your FMP API key and subscription limits.")
+                return None
+            elif e.response.status_code == 404:
+                logging.warning(f"Resource not found (HTTP 404) for {ticker or 'request'}")
+                return None
+            else:
+                logging.error(f"HTTP Error {e.response.status_code} from FMP API: {e}")
+                if attempt == max_retries - 1:
+                    return None
+                    
+        except requests.exceptions.Timeout:
+            logging.warning(f"Request timeout (attempt {attempt + 1}/{max_retries}) for {ticker or 'request'}")
+            if attempt == max_retries - 1:
+                logging.error(f"Final timeout after {max_retries} attempts")
+                return None
+                
+        except requests.exceptions.ConnectionError as e:
+            logging.warning(f"Connection error (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                logging.error(f"Final connection error after {max_retries} attempts")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Request error from FMP API: {e}")
+            return None
+            
+        except ValueError as e:  # JSON decode error
+            logging.error(f"Invalid JSON response from FMP API: {e}")
+            return None
+            
+        # Wait before retry (except for last attempt)
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+            logging.info(f"Retrying in {wait_time} seconds...")
+            time.sleep(wait_time)
+            
+    return None
 
 def fetch_company_profile(ticker):
     """
@@ -30,8 +140,11 @@ def fetch_company_profile(ticker):
         dict: Company profile data including symbol, companyName, sector, industry, etc.
         None: If profile could not be fetched
     """
-    return get_company_profile(ticker)
-
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to fetch_company_profile")
+        return None
+        
+    return get_company_profile(ticker.upper().strip())
 
 def get_company_profile(ticker):
     """
@@ -48,28 +161,29 @@ def get_company_profile(ticker):
             - website, address, phone
         None: If profile could not be fetched
     """
-    if not _check_fmp_api_key():
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to get_company_profile")
         return None
-
+        
+    ticker = ticker.upper().strip()
     url = f"{BASE_URL}/profile/{ticker}?apikey={get_fmp_api_key()}"
     
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data and len(data) > 0:
-            profile = data[0]
-            logging.info(f"Successfully fetched profile for {ticker}: {profile.get('companyName', 'N/A')}")
-            return profile
-        else:
-            logging.warning(f"No profile data found for {ticker}.")
-            return None
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching company profile from FMP API: {e}")
+    data = _make_api_request(url, ticker=ticker)
+    if not data:
         return None
-
+        
+    if len(data) > 0:
+        profile = data[0]
+        # Validate essential fields
+        if not profile.get('symbol') or not profile.get('companyName'):
+            logging.warning(f"Incomplete profile data for {ticker}")
+            return None
+            
+        logging.info(f"Successfully fetched profile for {ticker}: {profile.get('companyName', 'N/A')}")
+        return profile
+    else:
+        logging.warning(f"No profile data found for {ticker}.")
+        return None
 
 def get_historical_prices(ticker, limit=None):
     """
@@ -84,30 +198,58 @@ def get_historical_prices(ticker, limit=None):
             - date, open, high, low, close, adjClose, volume, change, changePercent
         None: If historical prices could not be fetched
     """
-    if not _check_fmp_api_key():
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to get_historical_prices")
         return None
-
+        
+    ticker = ticker.upper().strip()
     url = f"{BASE_URL}/historical-price-full/{ticker}?apikey={get_fmp_api_key()}"
-    if limit:
+    if limit and isinstance(limit, int) and limit > 0:
         url += f"&limit={limit}"
     
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    data = _make_api_request(url, ticker=ticker)
+    if not data:
+        return None
         
-        if 'historical' in data:
-            historical_data = data['historical']
+    if 'historical' in data and data['historical']:
+        historical_data = data['historical']
+        
+        # Validate data structure
+        required_fields = ['date', 'close', 'open', 'high', 'low']
+        if historical_data and all(field in historical_data[0] for field in required_fields):
             logging.info(f"Successfully fetched {len(historical_data)} historical price records for {ticker}")
             return historical_data
         else:
-            logging.warning(f"No historical price data found for {ticker}.")
+            logging.warning(f"Historical price data missing required fields for {ticker}")
             return None
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching historical prices from FMP API: {e}")
+    else:
+        logging.warning(f"No historical price data found for {ticker}.")
         return None
 
+def _validate_date_input(date_input, param_name="date"):
+    """Validate and convert date input to datetime.date object."""
+    if not date_input:
+        logging.warning(f"{param_name} is required")
+        return None
+        
+    try:
+        if isinstance(date_input, str):
+            # Try common date formats
+            for fmt in ['%Y-%m-%d', '%m/%d/%Y', '%m-%d-%Y']:
+                try:
+                    return datetime.datetime.strptime(date_input, fmt).date()
+                except ValueError:
+                    continue
+            raise ValueError(f"Unsupported date format: {date_input}")
+        elif isinstance(date_input, datetime.datetime):
+            return date_input.date()
+        elif isinstance(date_input, datetime.date):
+            return date_input
+        else:
+            raise ValueError(f"Unsupported date type: {type(date_input)}")
+    except Exception as e:
+        logging.error(f"Error validating {param_name}: {e}")
+        return None
 
 def calculate_stock_performance(ticker, call_date, historical_prices=None):
     """
@@ -126,9 +268,15 @@ def calculate_stock_performance(ticker, call_date, historical_prices=None):
               performance_1_week, performance_1_month, performance_3_month
         None: If calculation failed
     """
-    if not call_date:
-        logging.warning("Call date is required for stock performance calculation")
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to calculate_stock_performance")
         return None
+        
+    call_date = _validate_date_input(call_date, "call_date")
+    if not call_date:
+        return None
+        
+    ticker = ticker.upper().strip()
         
     try:
         # Fetch historical prices if not provided
@@ -139,14 +287,21 @@ def calculate_stock_performance(ticker, call_date, historical_prices=None):
             logging.warning(f"No historical prices available for {ticker}")
             return None
 
-        # Convert call_date to datetime if it's a string
-        if isinstance(call_date, str):
-            call_date = datetime.datetime.strptime(call_date, '%Y-%m-%d').date()
-        elif isinstance(call_date, datetime.datetime):
-            call_date = call_date.date()
-
         df = pd.DataFrame(historical_prices)
-        df['date'] = pd.to_datetime(df['date'])
+        
+        # Validate DataFrame structure
+        required_columns = ['date', 'close']
+        if not all(col in df.columns for col in required_columns):
+            logging.error(f"Historical price data missing required columns for {ticker}")
+            return None
+            
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.dropna(subset=['date', 'close'])
+        
+        if df.empty:
+            logging.warning(f"No valid price data after cleaning for {ticker}")
+            return None
+            
         df = df.set_index('date').sort_index()
 
         call_date_dt = pd.to_datetime(call_date)
@@ -154,9 +309,9 @@ def calculate_stock_performance(ticker, call_date, historical_prices=None):
         # Find the price at call date (or closest prior date)
         price_at_call_series = df.loc[df.index <= call_date_dt, 'close']
         if price_at_call_series.empty:
-            logging.warning(f"No price data available at or before call date {call_date}")
+            logging.warning(f"No price data available at or before call date {call_date} for {ticker}")
             return None
-        price_at_call = price_at_call_series.iloc[-1]
+        price_at_call = float(price_at_call_series.iloc[-1])
 
         # Calculate future dates
         one_week_later = call_date_dt + pd.Timedelta(weeks=1)
@@ -164,14 +319,25 @@ def calculate_stock_performance(ticker, call_date, historical_prices=None):
         three_month_later = call_date_dt + pd.Timedelta(days=90)
 
         # Get prices at future dates (or closest available)
-        price_1_week = df.loc[df.index >= one_week_later, 'close'].iloc[0] if not df.loc[df.index >= one_week_later].empty else None
-        price_1_month = df.loc[df.index >= one_month_later, 'close'].iloc[0] if not df.loc[df.index >= one_month_later].empty else None
-        price_3_month = df.loc[df.index >= three_month_later, 'close'].iloc[0] if not df.loc[df.index >= three_month_later].empty else None
+        def get_next_available_price(target_date):
+            future_prices = df.loc[df.index >= target_date, 'close']
+            if not future_prices.empty:
+                return float(future_prices.iloc[0])
+            return None
+
+        price_1_week = get_next_available_price(one_week_later)
+        price_1_month = get_next_available_price(one_month_later)
+        price_3_month = get_next_available_price(three_month_later)
 
         # Calculate performance percentages
-        performance_1_week = (price_1_week - price_at_call) / price_at_call if price_1_week else None
-        performance_1_month = (price_1_month - price_at_call) / price_at_call if price_1_month else None
-        performance_3_month = (price_3_month - price_at_call) / price_at_call if price_3_month else None
+        def safe_performance_calc(future_price, base_price):
+            if future_price is not None and base_price and base_price != 0:
+                return (future_price - base_price) / base_price
+            return None
+
+        performance_1_week = safe_performance_calc(price_1_week, price_at_call)
+        performance_1_month = safe_performance_calc(price_1_month, price_at_call)
+        performance_3_month = safe_performance_calc(price_3_month, price_at_call)
 
         logging.info(f"Calculated stock performance for {ticker} from {call_date}")
         return {
@@ -188,7 +354,6 @@ def calculate_stock_performance(ticker, call_date, historical_prices=None):
         logging.error(f"Error calculating stock performance for {ticker}: {e}")
         return None
 
-
 def get_financial_statements(ticker, period="quarter", limit=1):
     """
     Fetches financial statements for a given ticker from the FMP API.
@@ -202,42 +367,41 @@ def get_financial_statements(ticker, period="quarter", limit=1):
         dict: Contains income_statement and balance_sheet data
         None: If financial statements could not be fetched
     """
-    if not _check_fmp_api_key():
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to get_financial_statements")
         return None
-
+        
+    if period not in ["quarter", "annual"]:
+        logging.error(f"Invalid period '{period}'. Must be 'quarter' or 'annual'")
+        return None
+        
+    if not isinstance(limit, int) or limit < 1:
+        logging.error(f"Invalid limit '{limit}'. Must be positive integer")
+        return None
+        
+    ticker = ticker.upper().strip()
+    
     income_url = f"{BASE_URL}/income-statement/{ticker}?period={period}&limit={limit}&apikey={get_fmp_api_key()}"
     balance_url = f"{BASE_URL}/balance-sheet-statement/{ticker}?period={period}&limit={limit}&apikey={get_fmp_api_key()}"
     
-    try:
-        income_response = requests.get(income_url, timeout=10)
-        income_response.raise_for_status()
-        income_statement = income_response.json()
-
-        balance_response = requests.get(balance_url, timeout=10)
-        balance_response.raise_for_status()
-        balance_sheet = balance_response.json()
-
-        if income_statement and balance_sheet:
-            result = {
-                "income_statement": income_statement[0] if limit == 1 else income_statement,
-                "balance_sheet": balance_sheet[0] if limit == 1 else balance_sheet
-            }
-            logging.info(f"Successfully fetched financial statements for {ticker}.")
-            return result
-        else:
-            logging.warning(f"No financial statements found for {ticker}.")
-            return None
-
-    except requests.exceptions.HTTPError as e:
-        logging.error(f"HTTP Error fetching financial statements from FMP API (Status: {e.response.status_code}): {e}. Check your API key or ticker symbol.")
+    income_statement = _make_api_request(income_url, ticker=ticker)
+    if not income_statement:
         return None
-    except requests.exceptions.ConnectionError as e:
-        logging.error(f"Connection Error fetching financial statements from FMP API: {e}. Check your internet connection.")
-        return None
-    except requests.exceptions.RequestException as e:
-        logging.error(f"An unexpected Request Error occurred fetching financial statements from FMP API for {ticker}: {e}")
+        
+    balance_sheet = _make_api_request(balance_url, ticker=ticker)
+    if not balance_sheet:
         return None
 
+    if income_statement and balance_sheet:
+        result = {
+            "income_statement": income_statement[0] if limit == 1 and income_statement else income_statement,
+            "balance_sheet": balance_sheet[0] if limit == 1 and balance_sheet else balance_sheet
+        }
+        logging.info(f"Successfully fetched financial statements for {ticker}.")
+        return result
+    else:
+        logging.warning(f"Incomplete financial statements found for {ticker}.")
+        return None
 
 def get_stock_quote(ticker):
     """
@@ -250,28 +414,29 @@ def get_stock_quote(ticker):
         dict: Real-time quote data including price, change, volume
         None: If quote could not be fetched
     """
-    if not _check_fmp_api_key():
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to get_stock_quote")
         return None
-
+        
+    ticker = ticker.upper().strip()
     url = f"{BASE_URL}/quote/{ticker}?apikey={get_fmp_api_key()}"
     
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data and len(data) > 0:
-            quote = data[0]
-            logging.info(f"Successfully fetched quote for {ticker}: ${quote.get('price', 'N/A')}")
-            return quote
-        else:
-            logging.warning(f"No quote data found for {ticker}.")
-            return None
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching stock quote from FMP API: {e}")
+    data = _make_api_request(url, ticker=ticker)
+    if not data:
         return None
-
+        
+    if len(data) > 0:
+        quote = data[0]
+        # Validate essential fields
+        if 'symbol' not in quote or 'price' not in quote:
+            logging.warning(f"Incomplete quote data for {ticker}")
+            return None
+            
+        logging.info(f"Successfully fetched quote for {ticker}: ${quote.get('price', 'N/A')}")
+        return quote
+    else:
+        logging.warning(f"No quote data found for {ticker}.")
+        return None
 
 def batch_fetch_company_profiles(tickers):
     """
@@ -284,15 +449,27 @@ def batch_fetch_company_profiles(tickers):
         list: List of company profile dictionaries in the same order as input.
               Failed fetches will be None in the corresponding position.
     """
+    if not tickers or not isinstance(tickers, list):
+        logging.error("Invalid tickers list provided to batch_fetch_company_profiles")
+        return []
+        
     results = []
     
     for i, ticker in enumerate(tickers):
+        if not ticker or not isinstance(ticker, str):
+            logging.warning(f"Skipping invalid ticker at position {i}: {ticker}")
+            results.append(None)
+            continue
+            
         logging.info(f"Fetching profile {i+1}/{len(tickers)}: {ticker}")
         result = get_company_profile(ticker)
         results.append(result)
         
+        # Small delay to be respectful to API
+        if i < len(tickers) - 1:  # Don't sleep after last request
+            time.sleep(0.1)
+        
     return results
-
 
 def batch_fetch_historical_prices(tickers, limit=None):
     """
@@ -305,15 +482,27 @@ def batch_fetch_historical_prices(tickers, limit=None):
     Returns:
         dict: Dictionary mapping ticker -> historical price data
     """
+    if not tickers or not isinstance(tickers, list):
+        logging.error("Invalid tickers list provided to batch_fetch_historical_prices")
+        return {}
+        
     results = {}
     
     for i, ticker in enumerate(tickers):
+        if not ticker or not isinstance(ticker, str):
+            logging.warning(f"Skipping invalid ticker at position {i}: {ticker}")
+            results[ticker] = None
+            continue
+            
         logging.info(f"Fetching historical prices {i+1}/{len(tickers)}: {ticker}")
         historical_data = get_historical_prices(ticker, limit)
         results[ticker] = historical_data
         
+        # Small delay to be respectful to API
+        if i < len(tickers) - 1:  # Don't sleep after last request
+            time.sleep(0.1)
+        
     return results
-
 
 def get_market_summary():
     """
@@ -323,34 +512,31 @@ def get_market_summary():
         dict: Market summary data including major indices
         None: If market summary could not be fetched
     """
-    if not _check_fmp_api_key():
-        return None
-
     # Get data for major indices
     indices = ["^GSPC", "^DJI", "^IXIC"]  # S&P 500, Dow Jones, NASDAQ
     url = f"{BASE_URL}/quote/{','.join(indices)}?apikey={get_fmp_api_key()}"
     
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+    data = _make_api_request(url)
+    if not data:
+        return None
         
-        if data:
-            market_data = {
-                'sp500': next((item for item in data if item['symbol'] == '^GSPC'), None),
-                'dow_jones': next((item for item in data if item['symbol'] == '^DJI'), None),
-                'nasdaq': next((item for item in data if item['symbol'] == '^IXIC'), None)
-            }
+    if data:
+        market_data = {
+            'sp500': next((item for item in data if item.get('symbol') == '^GSPC'), None),
+            'dow_jones': next((item for item in data if item.get('symbol') == '^DJI'), None),
+            'nasdaq': next((item for item in data if item.get('symbol') == '^IXIC'), None)
+        }
+        
+        # Verify we got at least some data
+        if any(market_data.values()):
             logging.info("Successfully fetched market summary")
             return market_data
         else:
-            logging.warning("No market summary data found.")
+            logging.warning("No market data found in response")
             return None
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching market summary from FMP API: {e}")
+    else:
+        logging.warning("No market summary data found.")
         return None
-
 
 def get_earnings_calendar(ticker=None):
     """
@@ -363,30 +549,22 @@ def get_earnings_calendar(ticker=None):
         list: Earnings calendar entries
         None: If calendar could not be fetched
     """
-    if not _check_fmp_api_key():
-        return None
-
     if ticker:
+        if not isinstance(ticker, str):
+            logging.error("Invalid ticker provided to get_earnings_calendar")
+            return None
+        ticker = ticker.upper().strip()
         url = f"{BASE_URL}/historical/earning_calendar/{ticker}?apikey={get_fmp_api_key()}"
     else:
         url = f"{BASE_URL}/earning_calendar?apikey={get_fmp_api_key()}"
     
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data:
-            logging.info(f"Successfully fetched earnings calendar{' for ' + ticker if ticker else ''}")
-            return data
-        else:
-            logging.warning(f"No earnings calendar data found{' for ' + ticker if ticker else ''}.")
-            return None
-
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error fetching earnings calendar from FMP API: {e}")
+    data = _make_api_request(url, ticker=ticker)
+    if data:
+        logging.info(f"Successfully fetched earnings calendar{' for ' + ticker if ticker else ''}")
+        return data
+    else:
+        logging.warning(f"No earnings calendar data found{' for ' + ticker if ticker else ''}.")
         return None
-
 
 def validate_financial_data(data, data_type):
     """
@@ -426,11 +604,11 @@ def validate_financial_data(data, data_type):
             required_fields = ['price_at_call', 'performance_1_week', 'performance_1_month', 'performance_3_month']
             return isinstance(data, dict) and all(field in data for field in required_fields)
             
-    except Exception:
+    except Exception as e:
+        logging.error(f"Error validating {data_type} data: {e}")
         return False
         
     return False
-
 
 def get_price_at_date(ticker, target_date, historical_prices=None):
     """
@@ -445,6 +623,16 @@ def get_price_at_date(ticker, target_date, historical_prices=None):
         dict: Contains price, date, and closest_match info
         None: If price could not be found
     """
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to get_price_at_date")
+        return None
+        
+    target_date = _validate_date_input(target_date, "target_date")
+    if not target_date:
+        return None
+        
+    ticker = ticker.upper().strip()
+    
     try:
         # Fetch historical prices if not provided
         if historical_prices is None:
@@ -453,14 +641,21 @@ def get_price_at_date(ticker, target_date, historical_prices=None):
         if not historical_prices:
             return None
 
-        # Convert target_date to datetime if it's a string
-        if isinstance(target_date, str):
-            target_date = datetime.datetime.strptime(target_date, '%Y-%m-%d').date()
-        elif isinstance(target_date, datetime.datetime):
-            target_date = target_date.date()
-
         df = pd.DataFrame(historical_prices)
-        df['date'] = pd.to_datetime(df['date']).dt.date
+        
+        # Validate DataFrame structure
+        if 'date' not in df.columns or 'close' not in df.columns:
+            logging.error(f"Historical price data missing required columns for {ticker}")
+            return None
+            
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df = df.dropna(subset=['date', 'close'])
+        
+        if df.empty:
+            logging.warning(f"No valid price data for {ticker}")
+            return None
+            
+        df['date'] = df['date'].dt.date
         df = df.sort_values('date')
 
         # Find exact match first
@@ -468,7 +663,7 @@ def get_price_at_date(ticker, target_date, historical_prices=None):
         if not exact_match.empty:
             row = exact_match.iloc[0]
             return {
-                'price': row['close'],
+                'price': float(row['close']),
                 'date': row['date'].strftime('%Y-%m-%d'),
                 'closest_match': True
             }
@@ -478,7 +673,7 @@ def get_price_at_date(ticker, target_date, historical_prices=None):
         if not before_target.empty:
             row = before_target.iloc[-1]  # Most recent date before target
             return {
-                'price': row['close'],
+                'price': float(row['close']),
                 'date': row['date'].strftime('%Y-%m-%d'),
                 'closest_match': False
             }
@@ -487,7 +682,7 @@ def get_price_at_date(ticker, target_date, historical_prices=None):
         if not df.empty:
             row = df.iloc[0]
             return {
-                'price': row['close'],
+                'price': float(row['close']),
                 'date': row['date'].strftime('%Y-%m-%d'),
                 'closest_match': False
             }
@@ -497,7 +692,6 @@ def get_price_at_date(ticker, target_date, historical_prices=None):
     except Exception as e:
         logging.error(f"Error getting price at date for {ticker}: {e}")
         return None
-
 
 def compare_performance_to_market(ticker, call_date, historical_prices=None):
     """
@@ -512,6 +706,16 @@ def compare_performance_to_market(ticker, call_date, historical_prices=None):
         dict: Contains relative performance vs S&P 500, sector performance, etc.
         None: If comparison could not be performed
     """
+    if not ticker or not isinstance(ticker, str):
+        logging.error("Invalid ticker provided to compare_performance_to_market")
+        return None
+        
+    call_date = _validate_date_input(call_date, "call_date")
+    if not call_date:
+        return None
+        
+    ticker = ticker.upper().strip()
+    
     try:
         # Get stock performance
         stock_perf = calculate_stock_performance(ticker, call_date, historical_prices)
@@ -528,18 +732,14 @@ def compare_performance_to_market(ticker, call_date, historical_prices=None):
             }
 
         # Calculate relative performance
-        relative_1_week = None
-        relative_1_month = None  
-        relative_3_month = None
+        def safe_relative_calc(stock_perf_val, market_perf_val):
+            if stock_perf_val is not None and market_perf_val is not None:
+                return stock_perf_val - market_perf_val
+            return None
 
-        if stock_perf['performance_1_week'] and sp500_perf['performance_1_week']:
-            relative_1_week = stock_perf['performance_1_week'] - sp500_perf['performance_1_week']
-            
-        if stock_perf['performance_1_month'] and sp500_perf['performance_1_month']:
-            relative_1_month = stock_perf['performance_1_month'] - sp500_perf['performance_1_month']
-            
-        if stock_perf['performance_3_month'] and sp500_perf['performance_3_month']:
-            relative_3_month = stock_perf['performance_3_month'] - sp500_perf['performance_3_month']
+        relative_1_week = safe_relative_calc(stock_perf['performance_1_week'], sp500_perf['performance_1_week'])
+        relative_1_month = safe_relative_calc(stock_perf['performance_1_month'], sp500_perf['performance_1_month'])
+        relative_3_month = safe_relative_calc(stock_perf['performance_3_month'], sp500_perf['performance_3_month'])
 
         return {
             'stock_performance': stock_perf,
@@ -550,9 +750,9 @@ def compare_performance_to_market(ticker, call_date, historical_prices=None):
                 'vs_sp500_3_month': relative_3_month
             },
             'outperformed_market': {
-                '1_week': relative_1_week > 0 if relative_1_week else None,
-                '1_month': relative_1_month > 0 if relative_1_month else None,
-                '3_month': relative_3_month > 0 if relative_3_month else None
+                '1_week': relative_1_week > 0 if relative_1_week is not None else None,
+                '1_month': relative_1_month > 0 if relative_1_month is not None else None,
+                '3_month': relative_3_month > 0 if relative_3_month is not None else None
             }
         }
         
