@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "earnings_analyzer"
-version = "1.2.0"
+version = "1.2.1"
+license = {text = "MIT"}
 authors = [
     { name="Jeremiah Bohr", email="jeremiah.bohr@gmail.com" },
 ]
@@ -43,6 +44,9 @@ dev = [
 
 [project.scripts]
 earnings-analyzer = "earnings_analyzer.main:main"
+
+[tool.setuptools]
+license-files = []
 
 [tool.setuptools.packages.find]
 where = ["src"]
