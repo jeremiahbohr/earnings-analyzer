@@ -184,7 +184,7 @@ def insert_stock_performance(conn, stock_performance_data):
         return None
 
 def select_earnings_calls_by_ticker(conn, ticker):
-    """Query earnings calls by ticker, returning call_date, quarter, and year."""
+    """Query earnings calls by ticker, returning call_date, quarter, year, and transcript_text."""
     try:
         cur = conn.cursor()
         cur.execute("""SELECT
@@ -193,6 +193,7 @@ def select_earnings_calls_by_ticker(conn, ticker):
             ec.quarter,
             ec.year,
             ec.filing_url,
+            ec.transcript_text,
             sa.overall_sentiment_score,
             sa.confidence_level,
             sa.model_name,
@@ -235,7 +236,7 @@ def select_earnings_call_by_ticker_quarter_year(conn, ticker, quarter, year):
         return None
 
 def select_all_earnings_calls(conn):
-    """Query all earnings calls from the earnings_calls table."""
+    """Query all earnings calls from the earnings_calls table, including transcript_text."""
     try:
         cur = conn.cursor()
         cur.execute("""SELECT
@@ -244,6 +245,7 @@ def select_all_earnings_calls(conn):
             ec.quarter,
             ec.year,
             ec.filing_url,
+            ec.transcript_text,
             sa.overall_sentiment_score,
             sa.confidence_level,
             sa.model_name,
@@ -260,4 +262,3 @@ def select_all_earnings_calls(conn):
     except Error as e:
         logging.error(f"Error selecting all earnings calls: {e}")
         return None
-
